@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
+use App\Events\TaskUpdated;
 
 class TaskController extends Controller
 {
@@ -38,35 +39,39 @@ class TaskController extends Controller
         
         $cacheKey = $this->generateCacheKey($user->id, $request->all());
         
-        return Cache::remember($cacheKey, 60, function () use ($query, $perPage) {
+        $tasks = Cache::remember($cacheKey, 60, function () use ($query, $perPage) {
             return $query->paginate($perPage);
         });
+
+        broadcast(new TaskUpdated($tasks))->toOthers();
+
+        return response()->json($tasks);
     }
 
     public function store(Request $request)
     {
-        $validator = Validator::make($request->all(), [
+        $validated = $request->validate([
             'title' => 'required|string|max:255',
-            'description' => 'required|string|max:1000',
-            'due_date' => 'required|date|after:today',
-            'priority' => 'required|in:low,medium,high',
+            'description' => 'required|string',
+            'status' => 'required|in:pending,completed',
+            'due_date' => 'nullable|date|after:today',
+            'priority' => 'required|in:low,medium,high'
         ]);
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
-
-        $task = $request->user()->tasks()->create([
-            'title' => $request->title,
-            'description' => $request->description,
-            'due_date' => $request->due_date,
-            'priority' => $request->priority,
-            'status' => 'pending'
+        $task = Task::create([
+            'title' => $validated['title'],
+            'description' => $validated['description'],
+            'status' => $validated['status'],
+            'due_date' => $validated['due_date'] ?? null,
+            'priority' => $validated['priority'],
+            'user_id' => auth()->id(),
         ]);
 
         $this->clearUserTasksCache($request->user()->id);
 
-        return response()->json($task, 201);
+        broadcast(new TaskUpdated($task))->toOthers();
+
+        return response()->json($task->load('user'), 201);
     }
 
     public function show(Request $request, Task $task)
@@ -75,31 +80,34 @@ class TaskController extends Controller
 
         $cacheKey = "task_{$task->id}";
         
-        return Cache::remember($cacheKey, 60, function () use ($task) {
+        $cachedTask = Cache::remember($cacheKey, 60, function () use ($task) {
             return $task;
         });
+
+        broadcast(new TaskUpdated($cachedTask))->toOthers();
+
+        return response()->json($cachedTask);
     }
 
     public function update(Request $request, Task $task)
     {
         $this->authorize('update', $task);
 
-        $validator = Validator::make($request->all(), [
+        $validated = $request->validate([
             'title' => 'sometimes|required|string|max:255',
-            'description' => 'sometimes|required|string|max:1000',
-            'due_date' => 'sometimes|required|date|after:today',
-            'priority' => 'sometimes|required|in:low,medium,high',
-            'status' => 'sometimes|required|in:pending,completed'
+            'description' => 'sometimes|required|string',
+            'status' => 'sometimes|required|in:pending,completed',
+            'due_date' => 'nullable|date|after:today',
+            'priority' => 'sometimes|required|in:low,medium,high'
         ]);
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
-
-        $task->update($request->all());
+        $task->update($validated);
+        $task->load('user');
 
         Cache::forget("task_{$task->id}");
         $this->clearUserTasksCache($request->user()->id);
+
+        broadcast(new TaskUpdated($task))->toOthers();
 
         return response()->json($task);
     }
@@ -113,6 +121,8 @@ class TaskController extends Controller
         Cache::forget("task_{$task->id}");
         $this->clearUserTasksCache($request->user()->id);
 
+        broadcast(new TaskUpdated($task))->toOthers();
+
         return response()->json(null, 204);
     }
 
@@ -125,6 +135,8 @@ class TaskController extends Controller
         Cache::forget("task_{$task->id}");
         $this->clearUserTasksCache($request->user()->id);
 
+        broadcast(new TaskUpdated($task))->toOthers();
+
         return response()->json($task);
     }
 
@@ -133,12 +145,16 @@ class TaskController extends Controller
         $user = $request->user();
         $cacheKey = "user_{$user->id}_overdue_tasks";
         
-        return Cache::remember($cacheKey, 60, function () use ($user) {
+        $overdueTasks = Cache::remember($cacheKey, 60, function () use ($user) {
             return $user->tasks()
                 ->overdue()
                 ->pending()
                 ->get();
         });
+
+        broadcast(new TaskUpdated($overdueTasks))->toOthers();
+
+        return response()->json($overdueTasks);
     }
 
     public function getHighPriorityTasks(Request $request)
@@ -146,12 +162,16 @@ class TaskController extends Controller
         $user = $request->user();
         $cacheKey = "user_{$user->id}_high_priority_tasks";
         
-        return Cache::remember($cacheKey, 60, function () use ($user) {
+        $highPriorityTasks = Cache::remember($cacheKey, 60, function () use ($user) {
             return $user->tasks()
                 ->highPriority()
                 ->pending()
                 ->get();
         });
+
+        broadcast(new TaskUpdated($highPriorityTasks))->toOthers();
+
+        return response()->json($highPriorityTasks);
     }
 
     private function clearUserTasksCache($userId)

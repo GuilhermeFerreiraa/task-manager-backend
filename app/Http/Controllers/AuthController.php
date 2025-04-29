@@ -21,7 +21,7 @@ class AuthController extends Controller
                 'required',
                 'string',
                 'min:8',
-                'regex:/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/'
+                'regex:/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]+$/'
             ],
         ], [
             'password.regex' => 'A senha deve conter pelo menos uma letra maiúscula, uma minúscula, um número e um caractere especial.'
@@ -38,14 +38,12 @@ class AuthController extends Controller
         ]);
 
         $token = $user->createToken('auth_token')->plainTextToken;
-        $tokenId = Str::before($token, '|');
 
         return response()->json([
-            'access_token' => $token,
-            'token_type' => 'Bearer',
-            'expires_in' => 3600, // 1 hora
-            'user' => $user
-        ]);
+            'user' => $user,
+            'token' => $token,
+            'token_type' => 'Bearer'
+        ], 201);
     }
 
     public function login(Request $request)
@@ -59,38 +57,25 @@ class AuthController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        $credentials = $request->only('email', 'password');
-
-        if (!Auth::attempt($credentials)) {
+        if (!Auth::attempt($request->only('email', 'password'))) {
             return response()->json([
                 'message' => 'Credenciais inválidas'
             ], 401);
         }
 
-        $user = User::where('email', $request->email)->first();
+        $user = User::where('email', $request->email)->firstOrFail();
         $token = $user->createToken('auth_token')->plainTextToken;
-        $tokenId = Str::before($token, '|');
-
-        // Cache do token
-        Cache::put('user_token_' . $user->id, $tokenId, 3600);
 
         return response()->json([
-            'access_token' => $token,
-            'token_type' => 'Bearer',
-            'expires_in' => 3600,
-            'user' => $user
+            'user' => $user,
+            'token' => $token,
+            'token_type' => 'Bearer'
         ]);
     }
 
     public function logout(Request $request)
     {
-        $user = $request->user();
-        
-        // Remove o token do cache
-        Cache::forget('user_token_' . $user->id);
-        
-        // Revoga todos os tokens do usuário
-        $user->tokens()->delete();
+        $request->user()->currentAccessToken()->delete();
 
         return response()->json([
             'message' => 'Logout realizado com sucesso'
