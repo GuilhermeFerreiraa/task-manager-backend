@@ -4,48 +4,26 @@ namespace App\Http\Controllers;
 
 use App\Models\Task;
 use Illuminate\Http\Request;
+use App\Mail\TaskCreatedNotification;
+use App\Traits\ApiResponse;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Str;
-use App\Events\TaskUpdated;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 
 class TaskController extends Controller
 {
+    use ApiResponse, AuthorizesRequests;
+
     public function index(Request $request)
     {
         $user = $request->user();
-        $page = $request->get('page', 1);
-        $perPage = $request->get('per_page', 10);
-        
-        $query = $user->tasks();
-        
-        // Filtros
-        if ($request->has('status')) {
-            $query->where('status', $request->status);
-        }
-        
-        if ($request->has('priority')) {
-            $query->where('priority', $request->priority);
-        }
-        
-        if ($request->has('due_date')) {
-            $query->whereDate('due_date', $request->due_date);
-        }
-        
-        // Ordenação
-        $sortField = $request->get('sort_by', 'created_at');
-        $sortDirection = $request->get('sort_direction', 'desc');
-        $query->orderBy($sortField, $sortDirection);
-        
-        $cacheKey = $this->generateCacheKey($user->id, $request->all());
-        
-        $tasks = Cache::remember($cacheKey, 60, function () use ($query, $perPage) {
-            return $query->paginate($perPage);
-        });
 
-        broadcast(new TaskUpdated($tasks))->toOthers();
+        $tasks = Task::with('user')
+            ->where('user_id', $user->id)
+            ->orderBy('created_at', 'desc')
+            ->get();
 
-        return response()->json($tasks);
+        return $this->successResponse($tasks);
     }
 
     public function store(Request $request)
@@ -53,91 +31,93 @@ class TaskController extends Controller
         $validated = $request->validate([
             'title' => 'required|string|max:255',
             'description' => 'required|string',
-            'status' => 'required|in:pending,completed',
+            'status' => 'required|in:' . implode(',', Task::getStatusOptions()),
             'due_date' => 'nullable|date|after:today',
-            'priority' => 'required|in:low,medium,high'
+            'priority' => 'required|in:' . implode(',', Task::getPriorityOptions())
         ]);
+
+        $user = $request->user();
 
         $task = Task::create([
             'title' => $validated['title'],
             'description' => $validated['description'],
             'status' => $validated['status'],
+            'completed' => $validated['status'] === Task::STATUS_COMPLETED,
             'due_date' => $validated['due_date'] ?? null,
             'priority' => $validated['priority'],
-            'user_id' => auth()->id(),
+            'user_id' => $user->id,
         ]);
 
-        $this->clearUserTasksCache($request->user()->id);
+        Mail::to($user)->queue(new TaskCreatedNotification($task, $user));
 
-        broadcast(new TaskUpdated($task))->toOthers();
-
-        return response()->json($task->load('user'), 201);
+        return $this->successResponse($task->load('user'), 'Task created successfully', 201);
     }
 
     public function show(Request $request, Task $task)
     {
         $this->authorize('view', $task);
 
-        $cacheKey = "task_{$task->id}";
-        
-        $cachedTask = Cache::remember($cacheKey, 60, function () use ($task) {
-            return $task;
-        });
+        if (!$task) {
+            return $this->errorResponse('Task not found', 404);
+        }
 
-        broadcast(new TaskUpdated($cachedTask))->toOthers();
-
-        return response()->json($cachedTask);
+        return $this->successResponse($task->load('user'));
     }
 
     public function update(Request $request, Task $task)
     {
         $this->authorize('update', $task);
 
+        if (!$task) {
+            return $this->errorResponse('Task not found', 404);
+        }
+
         $validated = $request->validate([
             'title' => 'sometimes|required|string|max:255',
             'description' => 'sometimes|required|string',
-            'status' => 'sometimes|required|in:pending,completed',
+            'status' => 'sometimes|required|in:' . implode(',', Task::getStatusOptions()),
             'due_date' => 'nullable|date|after:today',
-            'priority' => 'sometimes|required|in:low,medium,high'
+            'priority' => 'sometimes|required|in:' . implode(',', Task::getPriorityOptions())
         ]);
+
+        if (isset($validated['status'])) {
+            $validated['completed'] = $validated['status'] === Task::STATUS_COMPLETED;
+        }
 
         $task->update($validated);
         $task->load('user');
 
-        Cache::forget("task_{$task->id}");
-        $this->clearUserTasksCache($request->user()->id);
-
-        broadcast(new TaskUpdated($task))->toOthers();
-
-        return response()->json($task);
+        return $this->successResponse($task, 'Task updated successfully');
     }
 
     public function destroy(Request $request, Task $task)
     {
         $this->authorize('delete', $task);
 
+        if (!$task) {
+            return $this->errorResponse('Task not found', 404);
+        }
+
         $task->delete();
 
-        Cache::forget("task_{$task->id}");
-        $this->clearUserTasksCache($request->user()->id);
-
-        broadcast(new TaskUpdated($task))->toOthers();
-
-        return response()->json(null, 204);
+        return $this->successResponse(null, 'Task deleted successfully', 204);
     }
 
     public function markAsCompleted(Request $request, Task $task)
     {
         $this->authorize('update', $task);
 
-        $task->update(['status' => 'completed']);
+        if (!$task) {
+            return $this->errorResponse('Task not found', 404);
+        }
 
-        Cache::forget("task_{$task->id}");
-        $this->clearUserTasksCache($request->user()->id);
+        $task->update([
+            'status' => Task::STATUS_COMPLETED,
+            'completed' => true
+        ]);
+        $task->load('user');
 
-        broadcast(new TaskUpdated($task))->toOthers();
-
-        return response()->json($task);
+        return $this->successResponse($task, 'Task marked as completed');
     }
 
     public function getOverdueTasks(Request $request)
@@ -152,9 +132,7 @@ class TaskController extends Controller
                 ->get();
         });
 
-        broadcast(new TaskUpdated($overdueTasks))->toOthers();
-
-        return response()->json($overdueTasks);
+        return $this->successResponse($overdueTasks);
     }
 
     public function getHighPriorityTasks(Request $request)
@@ -169,9 +147,7 @@ class TaskController extends Controller
                 ->get();
         });
 
-        broadcast(new TaskUpdated($highPriorityTasks))->toOthers();
-
-        return response()->json($highPriorityTasks);
+        return $this->successResponse($highPriorityTasks);
     }
 
     private function clearUserTasksCache($userId)
