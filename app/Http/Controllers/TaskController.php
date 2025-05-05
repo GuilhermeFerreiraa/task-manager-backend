@@ -32,7 +32,7 @@ class TaskController extends Controller
             'title' => 'required|string|max:255',
             'description' => 'required|string',
             'status' => 'required|in:' . implode(',', Task::getStatusOptions()),
-            'due_date' => 'nullable|date|after:today',
+            'due_date' => 'nullable|date|after_or_equal:today',
             'priority' => 'required|in:' . implode(',', Task::getPriorityOptions())
         ]);
 
@@ -76,7 +76,7 @@ class TaskController extends Controller
             'title' => 'sometimes|required|string|max:255',
             'description' => 'sometimes|required|string',
             'status' => 'sometimes|required|in:' . implode(',', Task::getStatusOptions()),
-            'due_date' => 'nullable|date|after:today',
+            'due_date' => 'nullable|date|after_or_equal:today',
             'priority' => 'sometimes|required|in:' . implode(',', Task::getPriorityOptions())
         ]);
 
@@ -124,7 +124,7 @@ class TaskController extends Controller
     {
         $user = $request->user();
         $cacheKey = "user_{$user->id}_overdue_tasks";
-        
+
         $overdueTasks = Cache::remember($cacheKey, 60, function () use ($user) {
             return $user->tasks()
                 ->overdue()
@@ -139,7 +139,7 @@ class TaskController extends Controller
     {
         $user = $request->user();
         $cacheKey = "user_{$user->id}_high_priority_tasks";
-        
+
         $highPriorityTasks = Cache::remember($cacheKey, 60, function () use ($user) {
             return $user->tasks()
                 ->highPriority()
